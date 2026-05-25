@@ -1444,7 +1444,25 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = attn_metadata[0].sin[layer_name]
         num_tokens = o_proj_input.shape[0]
         partial_slice = [self.nope_head_dim, self.head_dim]
-        x_rope = o_proj_input.unsqueeze(1)
+        rope_tokens = cos.shape[0]
+        if rope_tokens != sin.shape[0]:
+            raise RuntimeError(
+                f"RoPE cos/sin shape mismatch before o_proj: "
+                f"layer={layer_name}, cos={tuple(cos.shape)}, "
+                f"sin={tuple(sin.shape)}")
+        if rope_tokens > num_tokens:
+            raise RuntimeError(
+                f"RoPE tokens exceed o_proj input before o_proj: "
+                f"layer={layer_name}, o_proj_input={tuple(o_proj_input.shape)}, "
+                f"cos={tuple(cos.shape)}, sin={tuple(sin.shape)}")
+        if rope_tokens != num_tokens:
+            print(
+                "DSV4_ROPE_DEBUG o_proj_rope_prefix "
+                f"tag={layer_name}:o_proj "
+                f"o_proj_tokens={num_tokens} rope_tokens={rope_tokens} "
+                f"actual_tokens={actual_tokens}",
+                flush=True)
+        x_rope = o_proj_input[:rope_tokens].unsqueeze(1)
         _print_partial_rope_shape(f"{layer_name}:o_proj", x_rope, cos, -sin,
                                   partial_slice)
 
