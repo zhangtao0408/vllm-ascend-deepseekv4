@@ -53,6 +53,17 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 _PREPARE_INPUTS_BLOCK_SIZE = 4
 
 
+def _debug_shape(x):
+    if x is None:
+        return None
+    shape = getattr(x, "shape", None)
+    if shape is not None:
+        return tuple(shape)
+    if isinstance(x, dict):
+        return {"keys": list(x.keys())}
+    return type(x).__name__
+
+
 # TODO: Remove it when the bug of fx-graph is solved
 # patch vllm_config to be in CompilationMode.NONE temporarily
 @contextmanager
@@ -559,6 +570,33 @@ class SpecDecodeBaseProposer(EagleProposer):
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
+        draft_group_info = [
+            {
+                "layers": getattr(group, "layer_names", None),
+                "compress_ratio": getattr(group.kv_cache_spec,
+                                          "compress_ratio", None),
+                "block_size": getattr(group.kv_cache_spec, "block_size",
+                                      None),
+            } for group in self.draft_attn_groups
+        ]
+        print(
+            "DSV4_META_DEBUG proposer_enter "
+            f"method={self.method} use_cuda_graph={self.use_cuda_graph} "
+            f"batch_size={batch_size} num_prefill_reqs={num_prefill_reqs} "
+            f"num_decode_reqs={num_decode_reqs} "
+            f"target_token_ids={_debug_shape(target_token_ids)} "
+            f"next_token_ids={_debug_shape(next_token_ids)} "
+            f"target_positions={_debug_shape(target_positions)} "
+            f"target_hidden_states={_debug_shape(target_hidden_states)} "
+            f"token_indices_to_sample={_debug_shape(token_indices_to_sample)} "
+            f"common_num_actual={common_attn_metadata.num_actual_tokens} "
+            f"common_num_input={common_attn_metadata.num_input_tokens} "
+            f"common_positions={_debug_shape(common_attn_metadata.positions)} "
+            f"common_query_start_loc={_debug_shape(common_attn_metadata.query_start_loc)} "
+            f"common_seq_lens={_debug_shape(common_attn_metadata.seq_lens)} "
+            f"common_slot_mapping={_debug_shape(common_attn_metadata.slot_mapping)} "
+            f"draft_groups={draft_group_info}",
+            flush=True)
 
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
@@ -581,6 +619,20 @@ class SpecDecodeBaseProposer(EagleProposer):
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
         )
+        print(
+            "DSV4_META_DEBUG proposer_after_set_inputs "
+            f"num_tokens={num_tokens} "
+            f"token_indices_to_sample={_debug_shape(token_indices_to_sample)} "
+            f"input_ids_slice={_debug_shape(self.input_ids[:num_tokens])} "
+            f"positions_slice={_debug_shape(self._get_positions(num_tokens))} "
+            f"hidden_states_slice={_debug_shape(self.hidden_states[:num_tokens])} "
+            f"common_num_actual={common_attn_metadata.num_actual_tokens} "
+            f"common_num_input={common_attn_metadata.num_input_tokens} "
+            f"common_positions={_debug_shape(common_attn_metadata.positions)} "
+            f"common_query_start_loc={_debug_shape(common_attn_metadata.query_start_loc)} "
+            f"common_seq_lens={_debug_shape(common_attn_metadata.seq_lens)} "
+            f"common_slot_mapping={_debug_shape(common_attn_metadata.slot_mapping)}",
+            flush=True)
         if self.pcp_size * self.dcp_size > 1:
             assert long_seq_args is not None
             query_lens_d, ori_token_indices_to_sample = long_seq_args
@@ -590,11 +642,19 @@ class SpecDecodeBaseProposer(EagleProposer):
         else:
             num_input_tokens = num_tokens
 
+        num_input_tokens_before_sync = num_input_tokens
         (
             num_input_tokens,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
+        print(
+            "DSV4_META_DEBUG proposer_after_dp_sync "
+            f"num_tokens={num_tokens} "
+            f"num_input_tokens_before_sync={num_input_tokens_before_sync} "
+            f"num_input_tokens={num_input_tokens} "
+            f"num_tokens_across_dp={_debug_shape(num_tokens_across_dp)}",
+            flush=True)
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         if self.use_cuda_graph:
@@ -622,6 +682,18 @@ class SpecDecodeBaseProposer(EagleProposer):
             )
             common_attn_metadata.seq_lens = self.runner.seq_lens.gpu[:num_reqs_padded]
             common_attn_metadata.seq_lens_cpu = self.runner.seq_lens.cpu[:num_reqs_padded]
+            print(
+                "DSV4_META_DEBUG proposer_fullgraph_padded "
+                f"num_reqs_padded={num_reqs_padded} "
+                f"num_input_tokens={num_input_tokens} "
+                f"common_num_actual={common_attn_metadata.num_actual_tokens} "
+                f"common_num_input={common_attn_metadata.num_input_tokens} "
+                f"query_start_loc={_debug_shape(common_attn_metadata.query_start_loc)} "
+                f"query_start_loc_cpu={_debug_shape(common_attn_metadata.query_start_loc_cpu)} "
+                f"seq_lens={_debug_shape(common_attn_metadata.seq_lens)} "
+                f"seq_lens_cpu={_debug_shape(common_attn_metadata.seq_lens_cpu)} "
+                f"block_table={_debug_shape(common_attn_metadata.block_table_tensor)}",
+                flush=True)
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
@@ -642,17 +714,41 @@ class SpecDecodeBaseProposer(EagleProposer):
         self.slot_mapping_group[0][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping[:slot_mapping_lens])
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
-        common_attn_metadata.num_actual_tokens = num_tokens
         common_attn_metadata.num_input_tokens = num_input_tokens
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
         builder = self.draft_attn_groups[0].get_metadata_builder()
+        print(
+            "DSV4_META_DEBUG proposer_before_builder "
+            f"builder_id={id(builder)} "
+            f"num_tokens={num_tokens} num_input_tokens={num_input_tokens} "
+            f"common_num_actual={common_attn_metadata.num_actual_tokens} "
+            f"common_num_input={common_attn_metadata.num_input_tokens} "
+            f"input_ids_slice={_debug_shape(self.input_ids[:num_input_tokens])} "
+            f"positions_slice={_debug_shape(self._get_positions(num_input_tokens))} "
+            f"hidden_states_slice={_debug_shape(self.hidden_states[:num_input_tokens])} "
+            f"slot_mapping={_debug_shape(common_attn_metadata.slot_mapping)} "
+            f"query_start_loc={_debug_shape(common_attn_metadata.query_start_loc)}",
+            flush=True)
         extra_attn_metadata_args = dict(
                     prefill_ratio_to_sas_metadata=dict(),
                     decode_ratio_to_sas_metadata=dict(),
                     common_ratio_to_sas_metadata=dict(),
                     block_size=self.draft_attn_groups[0].kv_cache_spec.block_size)
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
+        print(
+            "DSV4_META_DEBUG proposer_after_builder "
+            f"metadata_num_actual={attn_metadata.num_actual_tokens} "
+            f"metadata_num_input={attn_metadata.num_input_tokens} "
+            f"metadata_num_decodes={attn_metadata.num_decodes} "
+            f"metadata_num_decode_tokens={attn_metadata.num_decode_tokens} "
+            f"metadata_num_prefills={attn_metadata.num_prefills} "
+            f"query_lens={_debug_shape(attn_metadata.query_lens)} "
+            f"cos={_debug_shape(attn_metadata.cos)} "
+            f"sin={_debug_shape(attn_metadata.sin)} "
+            f"prefill_cos={_debug_shape(attn_metadata.prefill.cos) if attn_metadata.prefill is not None else None} "
+            f"decode_cos={_debug_shape(attn_metadata.decode.cos) if attn_metadata.decode is not None else None}",
+            flush=True)
         attn_metadata = self._freeze_draft_step_attn_metadata(attn_metadata)
 
         if self.uses_mrope:
@@ -1329,6 +1425,19 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
 
         attn_metadata_builder = attn_group.get_metadata_builder()
+        print(
+            "DSV4_META_DEBUG proposer_update_step_before_builder "
+            f"draft_step={draft_step} builder_id={id(attn_metadata_builder)} "
+            f"input_batch_size={input_batch_size} batch_size={batch_size} "
+            f"common_num_actual={common_attn_metadata.num_actual_tokens} "
+            f"common_num_input={common_attn_metadata.num_input_tokens} "
+            f"positions={_debug_shape(common_attn_metadata.positions)} "
+            f"query_start_loc={_debug_shape(common_attn_metadata.query_start_loc)} "
+            f"seq_lens={_debug_shape(common_attn_metadata.seq_lens)} "
+            f"slot_mapping={_debug_shape(common_attn_metadata.slot_mapping)} "
+            f"compress_ratio={getattr(attn_group.kv_cache_spec, 'compress_ratio', None)} "
+            f"block_size={getattr(attn_group.kv_cache_spec, 'block_size', None)}",
+            flush=True)
 
         extra_attn_metadata_args = dict(
                     prefill_ratio_to_sas_metadata=dict(),
@@ -1342,6 +1451,20 @@ class SpecDecodeBaseProposer(EagleProposer):
             self.runner.get_model(),
             **extra_attn_metadata_args,
         )
+        print(
+            "DSV4_META_DEBUG proposer_update_step_after_builder "
+            f"draft_step={draft_step} "
+            f"metadata_num_actual={attn_metadata.num_actual_tokens} "
+            f"metadata_num_input={attn_metadata.num_input_tokens} "
+            f"metadata_num_decodes={attn_metadata.num_decodes} "
+            f"metadata_num_decode_tokens={attn_metadata.num_decode_tokens} "
+            f"metadata_num_prefills={attn_metadata.num_prefills} "
+            f"query_lens={_debug_shape(attn_metadata.query_lens)} "
+            f"cos={_debug_shape(attn_metadata.cos)} "
+            f"sin={_debug_shape(attn_metadata.sin)} "
+            f"prefill_cos={_debug_shape(attn_metadata.prefill.cos) if attn_metadata.prefill is not None else None} "
+            f"decode_cos={_debug_shape(attn_metadata.decode.cos) if attn_metadata.decode is not None else None}",
+            flush=True)
 
         if self.pcp_size * self.dcp_size > 1:
             if self.vllm_config.model_config.use_mla:

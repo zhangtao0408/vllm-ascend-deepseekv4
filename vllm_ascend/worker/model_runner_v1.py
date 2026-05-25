@@ -151,6 +151,18 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 
+
+def _debug_shape(x):
+    if x is None:
+        return None
+    shape = getattr(x, "shape", None)
+    if shape is not None:
+        return tuple(shape)
+    if isinstance(x, dict):
+        return {"keys": list(x.keys())}
+    return type(x).__name__
+
+
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
     get_mc2_tokens_capacity,
@@ -2175,6 +2187,24 @@ class NPUModelRunner(GPUModelRunner):
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
         )
+        print(
+            "DSV4_META_DEBUG modelrunner_cm_base "
+            f"num_tokens={num_tokens} num_tokens_padded={num_tokens_padded} "
+            f"num_reqs={num_reqs} num_reqs_padded={num_reqs_padded} "
+            f"max_query_len={max_query_len} max_seq_len={max_seq_len} "
+            f"use_spec_decode={use_spec_decode} "
+            f"for_cudagraph_capture={for_cudagraph_capture} "
+            f"input_ids={_debug_shape(self.input_ids.gpu[:num_tokens_padded])} "
+            f"positions={_debug_shape(cm_base.positions)} "
+            f"positions_cpu={_debug_shape(cm_base.positions_cpu)} "
+            f"query_start_loc={_debug_shape(cm_base.query_start_loc)} "
+            f"query_start_loc_cpu={_debug_shape(cm_base.query_start_loc_cpu)} "
+            f"seq_lens={_debug_shape(cm_base.seq_lens)} "
+            f"seq_lens_cpu={_debug_shape(cm_base.seq_lens_cpu)} "
+            f"slot_mapping={_debug_shape(cm_base.slot_mapping)} "
+            f"block_table={_debug_shape(cm_base.block_table_tensor)} "
+            f"attn_state={cm_base.attn_state}",
+            flush=True)
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
@@ -2226,6 +2256,28 @@ class NPUModelRunner(GPUModelRunner):
                         common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                         block_size=attn_group.kv_cache_spec.block_size,
                         )
+                print(
+                    "DSV4_META_DEBUG modelrunner_dsa_group "
+                    f"kv_cache_gid={kv_cache_gid} attn_gid={attn_gid} "
+                    f"ubid={ubid} for_cudagraph_capture={for_cudagraph_capture} "
+                    f"use_spec_decode={use_spec_decode} "
+                    f"compress_ratio={compress_ratio} "
+                    f"block_size={attn_group.kv_cache_spec.block_size} "
+                    f"layer_names={attn_group.layer_names} "
+                    f"num_reqs={common_attn_metadata.num_reqs} "
+                    f"num_reqs_actual={num_reqs_actual} "
+                    f"num_actual_tokens={common_attn_metadata.num_actual_tokens} "
+                    f"num_input_tokens={common_attn_metadata.num_input_tokens} "
+                    f"graph_pad_size={common_attn_metadata.graph_pad_size} "
+                    f"positions={_debug_shape(common_attn_metadata.positions)} "
+                    f"positions_cpu={_debug_shape(common_attn_metadata.positions_cpu)} "
+                    f"query_start_loc={_debug_shape(common_attn_metadata.query_start_loc)} "
+                    f"query_start_loc_cpu={_debug_shape(common_attn_metadata.query_start_loc_cpu)} "
+                    f"seq_lens={_debug_shape(common_attn_metadata.seq_lens)} "
+                    f"seq_lens_cpu={_debug_shape(common_attn_metadata.seq_lens_cpu)} "
+                    f"slot_mapping={_debug_shape(common_attn_metadata.slot_mapping)} "
+                    f"block_table={_debug_shape(common_attn_metadata.block_table_tensor)}",
+                    flush=True)
 
             if for_cudagraph_capture and not isinstance(builder, AscendDSAMetadataBuilder):
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
@@ -2245,6 +2297,21 @@ class NPUModelRunner(GPUModelRunner):
                 prefill_ratio_to_sas_metadata = builder.prefill_ratio_to_sas_metadata
                 decode_ratio_to_sas_metadata = builder.decode_ratio_to_sas_metadata
                 common_ratio_to_sas_metadata = builder.common_ratio_to_sas_metadata
+                print(
+                    "DSV4_META_DEBUG modelrunner_dsa_built "
+                    f"kv_cache_gid={kv_cache_gid} attn_gid={attn_gid} "
+                    f"compress_ratio={getattr(attn_group.kv_cache_spec, 'compress_ratio', 1)} "
+                    f"metadata_num_actual_tokens={attn_metadata_i.num_actual_tokens} "
+                    f"metadata_num_input_tokens={attn_metadata_i.num_input_tokens} "
+                    f"metadata_num_decodes={attn_metadata_i.num_decodes} "
+                    f"metadata_num_decode_tokens={attn_metadata_i.num_decode_tokens} "
+                    f"metadata_num_prefills={attn_metadata_i.num_prefills} "
+                    f"query_lens={_debug_shape(attn_metadata_i.query_lens)} "
+                    f"cos={_debug_shape(attn_metadata_i.cos)} "
+                    f"sin={_debug_shape(attn_metadata_i.sin)} "
+                    f"prefill_cos={_debug_shape(attn_metadata_i.prefill.cos) if attn_metadata_i.prefill is not None else None} "
+                    f"decode_cos={_debug_shape(attn_metadata_i.decode.cos) if attn_metadata_i.decode is not None else None}",
+                    flush=True)
 
             if ubid is None:
                 assert isinstance(attn_metadata, dict)

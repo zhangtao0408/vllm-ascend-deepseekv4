@@ -161,7 +161,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
             _ROPE_STATE.runtime_buffer[config_key] = {}
 
         target_device = current_platform.device_type
-        max_batch_size = vllm_config.scheduler_config.max_num_batched_tokens + 128
+        max_batch_size = vllm_config.scheduler_config.max_num_batched_tokens
         for grp in rope_groups:
             if grp not in _ROPE_STATE.runtime_buffer[config_key]:
                 buf_cos = torch.ones(max_batch_size,
