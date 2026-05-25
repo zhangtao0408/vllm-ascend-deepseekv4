@@ -163,6 +163,15 @@ def _debug_shape(x):
     return type(x).__name__
 
 
+def _debug_layer_shape(x, layer_name):
+    if x is None:
+        return None
+    try:
+        return _debug_shape(x[layer_name])
+    except Exception as e:
+        return f"{type(x).__name__}[{type(e).__name__}]"
+
+
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
     get_mc2_tokens_capacity,
@@ -2297,10 +2306,12 @@ class NPUModelRunner(GPUModelRunner):
                 prefill_ratio_to_sas_metadata = builder.prefill_ratio_to_sas_metadata
                 decode_ratio_to_sas_metadata = builder.decode_ratio_to_sas_metadata
                 common_ratio_to_sas_metadata = builder.common_ratio_to_sas_metadata
+                first_layer_name = attn_group.layer_names[0]
                 print(
                     "DSV4_META_DEBUG modelrunner_dsa_built "
                     f"kv_cache_gid={kv_cache_gid} attn_gid={attn_gid} "
                     f"compress_ratio={getattr(attn_group.kv_cache_spec, 'compress_ratio', 1)} "
+                    f"first_layer={first_layer_name} "
                     f"metadata_num_actual_tokens={attn_metadata_i.num_actual_tokens} "
                     f"metadata_num_input_tokens={attn_metadata_i.num_input_tokens} "
                     f"metadata_num_decodes={attn_metadata_i.num_decodes} "
@@ -2309,8 +2320,12 @@ class NPUModelRunner(GPUModelRunner):
                     f"query_lens={_debug_shape(attn_metadata_i.query_lens)} "
                     f"cos={_debug_shape(attn_metadata_i.cos)} "
                     f"sin={_debug_shape(attn_metadata_i.sin)} "
+                    f"first_layer_cos={_debug_layer_shape(attn_metadata_i.cos, first_layer_name)} "
+                    f"first_layer_sin={_debug_layer_shape(attn_metadata_i.sin, first_layer_name)} "
                     f"prefill_cos={_debug_shape(attn_metadata_i.prefill.cos) if attn_metadata_i.prefill is not None else None} "
-                    f"decode_cos={_debug_shape(attn_metadata_i.decode.cos) if attn_metadata_i.decode is not None else None}",
+                    f"prefill_first_layer_cos={_debug_layer_shape(attn_metadata_i.prefill.cos, first_layer_name) if attn_metadata_i.prefill is not None else None} "
+                    f"decode_cos={_debug_shape(attn_metadata_i.decode.cos) if attn_metadata_i.decode is not None else None} "
+                    f"decode_first_layer_cos={_debug_layer_shape(attn_metadata_i.decode.cos, first_layer_name) if attn_metadata_i.decode is not None else None}",
                     flush=True)
 
             if ubid is None:

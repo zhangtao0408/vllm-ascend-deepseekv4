@@ -64,6 +64,15 @@ def _debug_shape(x):
     return type(x).__name__
 
 
+def _debug_layer_shape(x, layer_name):
+    if x is None:
+        return None
+    try:
+        return _debug_shape(x[layer_name])
+    except Exception as e:
+        return f"{type(x).__name__}[{type(e).__name__}]"
+
+
 # TODO: Remove it when the bug of fx-graph is solved
 # patch vllm_config to be in CompilationMode.NONE temporarily
 @contextmanager
@@ -736,8 +745,10 @@ class SpecDecodeBaseProposer(EagleProposer):
                     common_ratio_to_sas_metadata=dict(),
                     block_size=self.draft_attn_groups[0].kv_cache_spec.block_size)
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
+        first_layer_name = self.attn_layer_names[0]
         print(
             "DSV4_META_DEBUG proposer_after_builder "
+            f"first_layer={first_layer_name} "
             f"metadata_num_actual={attn_metadata.num_actual_tokens} "
             f"metadata_num_input={attn_metadata.num_input_tokens} "
             f"metadata_num_decodes={attn_metadata.num_decodes} "
@@ -746,8 +757,12 @@ class SpecDecodeBaseProposer(EagleProposer):
             f"query_lens={_debug_shape(attn_metadata.query_lens)} "
             f"cos={_debug_shape(attn_metadata.cos)} "
             f"sin={_debug_shape(attn_metadata.sin)} "
+            f"first_layer_cos={_debug_layer_shape(attn_metadata.cos, first_layer_name)} "
+            f"first_layer_sin={_debug_layer_shape(attn_metadata.sin, first_layer_name)} "
             f"prefill_cos={_debug_shape(attn_metadata.prefill.cos) if attn_metadata.prefill is not None else None} "
-            f"decode_cos={_debug_shape(attn_metadata.decode.cos) if attn_metadata.decode is not None else None}",
+            f"prefill_first_layer_cos={_debug_layer_shape(attn_metadata.prefill.cos, first_layer_name) if attn_metadata.prefill is not None else None} "
+            f"decode_cos={_debug_shape(attn_metadata.decode.cos) if attn_metadata.decode is not None else None} "
+            f"decode_first_layer_cos={_debug_layer_shape(attn_metadata.decode.cos, first_layer_name) if attn_metadata.decode is not None else None}",
             flush=True)
         attn_metadata = self._freeze_draft_step_attn_metadata(attn_metadata)
 
@@ -1451,9 +1466,11 @@ class SpecDecodeBaseProposer(EagleProposer):
             self.runner.get_model(),
             **extra_attn_metadata_args,
         )
+        first_layer_name = self.attn_layer_names[0]
         print(
             "DSV4_META_DEBUG proposer_update_step_after_builder "
             f"draft_step={draft_step} "
+            f"first_layer={first_layer_name} "
             f"metadata_num_actual={attn_metadata.num_actual_tokens} "
             f"metadata_num_input={attn_metadata.num_input_tokens} "
             f"metadata_num_decodes={attn_metadata.num_decodes} "
@@ -1462,8 +1479,12 @@ class SpecDecodeBaseProposer(EagleProposer):
             f"query_lens={_debug_shape(attn_metadata.query_lens)} "
             f"cos={_debug_shape(attn_metadata.cos)} "
             f"sin={_debug_shape(attn_metadata.sin)} "
+            f"first_layer_cos={_debug_layer_shape(attn_metadata.cos, first_layer_name)} "
+            f"first_layer_sin={_debug_layer_shape(attn_metadata.sin, first_layer_name)} "
             f"prefill_cos={_debug_shape(attn_metadata.prefill.cos) if attn_metadata.prefill is not None else None} "
-            f"decode_cos={_debug_shape(attn_metadata.decode.cos) if attn_metadata.decode is not None else None}",
+            f"prefill_first_layer_cos={_debug_layer_shape(attn_metadata.prefill.cos, first_layer_name) if attn_metadata.prefill is not None else None} "
+            f"decode_cos={_debug_shape(attn_metadata.decode.cos) if attn_metadata.decode is not None else None} "
+            f"decode_first_layer_cos={_debug_layer_shape(attn_metadata.decode.cos, first_layer_name) if attn_metadata.decode is not None else None}",
             flush=True)
 
         if self.pcp_size * self.dcp_size > 1:

@@ -63,6 +63,15 @@ def _debug_keys(x):
     return None if x is None else list(x.keys())
 
 
+def _debug_rope_call(tag: str, x: torch.Tensor, cos: torch.Tensor,
+                     sin: torch.Tensor, partial_slice: list[int]):
+    print(
+        "DSV4_META_DEBUG dsa_rope_call "
+        f"tag={tag} x={_debug_shape(x)} cos={_debug_shape(cos)} "
+        f"sin={_debug_shape(sin)} partial_slice={partial_slice}",
+        flush=True)
+
+
 def hadamard_transform_ref(x: torch.Tensor, hadamard: torch.Tensor, scale: int = 1.0, ):
     x_shape = x.shape
     dim = x.shape[-1]
@@ -1487,6 +1496,20 @@ class AscendDSAImpl(DSAAttentionImpl):
         has_decode = attn_metadata[0].num_decodes > 0
         decode_tokens = attn_metadata[0].num_decode_tokens
         actual_tokens = attn_metadata[0].num_actual_tokens
+        print(
+            "DSV4_META_DEBUG dsa_forward_enter "
+            f"layer={layer_name} compress_ratio={self.compress_ratio} "
+            f"need_gather_q_kv={need_gather_q_kv} "
+            f"hidden_states={_debug_shape(hidden_states)} "
+            f"output={_debug_shape(output)} "
+            f"forward_context_num_tokens={getattr(get_forward_context(), 'num_tokens', None)} "
+            f"metadata_len={len(attn_metadata)} "
+            f"meta0_actual={attn_metadata[0].num_actual_tokens} "
+            f"meta0_input={attn_metadata[0].num_input_tokens} "
+            f"meta0_decodes={attn_metadata[0].num_decodes} "
+            f"meta0_decode_tokens={attn_metadata[0].num_decode_tokens} "
+            f"meta0_prefills={attn_metadata[0].num_prefills}",
+            flush=True)
         prefill_hidden_states = hidden_states[decode_tokens:actual_tokens]
         decode_hidden_states = hidden_states[:decode_tokens]
 
@@ -1517,6 +1540,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         cos = attn_metadata[0].cos[layer_name]
         sin = attn_metadata[0].sin[layer_name]
         num_tokens = o_proj_input.shape[0]
+        _debug_rope_call(f"{layer_name}:o_proj", o_proj_input.unsqueeze(1),
+                         cos, -sin, [self.nope_head_dim, self.head_dim])
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input.unsqueeze(1), cos, -sin,
@@ -1581,6 +1606,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
         q = self.q_norm_without_weight(q)
         # q = triton_q_rms(q, self.eps)
+        _debug_rope_call(f"{layer_name}:prefill_q", q.unsqueeze(1), cos, sin,
+                         [self.nope_head_dim, self.head_dim])
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),
@@ -1594,6 +1621,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         kv = self.kv_norm(kv)
         assert self.rope_head_dim is not None
         kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+        _debug_rope_call(f"{layer_name}:prefill_kv", kv.unsqueeze(1), cos,
+                         sin, [self.nope_head_dim, self.head_dim])
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             kv.unsqueeze(1),
@@ -1867,6 +1896,8 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         # q = triton_q_rms(q, self.eps)
         q = self.q_norm_without_weight(q)
+        _debug_rope_call(f"{layer_name}:decode_q", q.unsqueeze(1), cos, sin,
+                         [self.nope_head_dim, self.head_dim])
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),
@@ -1887,6 +1918,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+            _debug_rope_call(f"{layer_name}:decode_kv", kv.unsqueeze(1), cos,
+                             sin, [self.nope_head_dim, self.head_dim])
 
             torch.ops._C_ascend.inplace_partial_rotary_mul(
                 kv.unsqueeze(1),
@@ -2137,6 +2170,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             q = self.inderxer_wq_b(qr)
         q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)  # [T, N, D]
+        _debug_rope_call(
+            "indexer_select_qli:q", q.unsqueeze(1), cos, sin,
+            [self.indexcom_head_dim - self.rope_head_dim,
+             self.indexcom_head_dim])
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),
