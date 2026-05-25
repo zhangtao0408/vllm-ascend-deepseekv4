@@ -48,14 +48,24 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 
-def _print_partial_rope_shape(tag: str, x: torch.Tensor, cos: torch.Tensor,
-                              sin: torch.Tensor, partial_slice: list[int]):
-    print(
-        f"DSV4_ROPE_DEBUG partial_rope tag={tag} "
-        f"x={tuple(x.shape)} cos={tuple(cos.shape)} "
-        f"sin={tuple(sin.shape)} partial_slice={partial_slice}",
-        flush=True,
-    )
+def _align_rope_to_x(tag: str, x: torch.Tensor, cos: torch.Tensor,
+                     sin: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    x_tokens = x.shape[0]
+    cos_tokens = cos.shape[0]
+    sin_tokens = sin.shape[0]
+    if cos_tokens != sin_tokens:
+        raise RuntimeError(
+            f"DSA RoPE cos/sin shape mismatch: tag={tag}, "
+            f"x={tuple(x.shape)}, cos={tuple(cos.shape)}, "
+            f"sin={tuple(sin.shape)}")
+    if cos_tokens == x_tokens:
+        return cos, sin
+    if cos_tokens > x_tokens:
+        return cos[:x_tokens], sin[:x_tokens]
+    raise RuntimeError(
+        f"DSA RoPE metadata shorter than input: tag={tag}, "
+        f"x={tuple(x.shape)}, cos={tuple(cos.shape)}, "
+        f"sin={tuple(sin.shape)}")
 
 
 def hadamard_transform_ref(x: torch.Tensor, hadamard: torch.Tensor, scale: int = 1.0, ):
@@ -464,13 +474,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                      != common_attn_metadata.num_actual_tokens
                      or cached_num_input_tokens
                      != common_attn_metadata.num_input_tokens)):
-            print(
-                "DSV4_ROPE_DEBUG rebuild_stale_dsa_metadata "
-                f"cached_actual={cached_num_actual_tokens} "
-                f"current_actual={common_attn_metadata.num_actual_tokens} "
-                f"cached_input={cached_num_input_tokens} "
-                f"current_input={common_attn_metadata.num_input_tokens}",
-                flush=True)
             self.common_ratio_to_sas_metadata.clear()
             self.prefill_ratio_to_sas_metadata.clear()
             self.decode_ratio_to_sas_metadata.clear()
@@ -1434,8 +1437,10 @@ class AscendDSAImpl(DSAAttentionImpl):
             hidden_states, need_gather_q_kv)
         has_prefill = attn_metadata[0].num_prefills > 0
         has_decode = attn_metadata[0].num_decodes > 0
-        decode_tokens = attn_metadata[0].num_decode_tokens
-        actual_tokens = attn_metadata[0].num_actual_tokens
+        actual_tokens = min(attn_metadata[0].num_actual_tokens,
+                            hidden_states.shape[0])
+        decode_tokens = min(attn_metadata[0].num_decode_tokens,
+                            actual_tokens)
         prefill_hidden_states = hidden_states[decode_tokens:actual_tokens]
         decode_hidden_states = hidden_states[:decode_tokens]
 
@@ -1470,27 +1475,21 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = attn_metadata[0].sin[layer_name]
         num_tokens = o_proj_input.shape[0]
         partial_slice = [self.nope_head_dim, self.head_dim]
-        rope_tokens = cos.shape[0]
-        if rope_tokens != sin.shape[0]:
+        cos_tokens = cos.shape[0]
+        if cos_tokens != sin.shape[0]:
             raise RuntimeError(
                 f"RoPE cos/sin shape mismatch before o_proj: "
                 f"layer={layer_name}, cos={tuple(cos.shape)}, "
                 f"sin={tuple(sin.shape)}")
+        rope_tokens = min(cos_tokens, actual_tokens, num_tokens)
         if rope_tokens > num_tokens:
             raise RuntimeError(
                 f"RoPE tokens exceed o_proj input before o_proj: "
                 f"layer={layer_name}, o_proj_input={tuple(o_proj_input.shape)}, "
                 f"cos={tuple(cos.shape)}, sin={tuple(sin.shape)}")
-        if rope_tokens != num_tokens:
-            print(
-                "DSV4_ROPE_DEBUG o_proj_rope_prefix "
-                f"tag={layer_name}:o_proj "
-                f"o_proj_tokens={num_tokens} rope_tokens={rope_tokens} "
-                f"actual_tokens={actual_tokens}",
-                flush=True)
         x_rope = o_proj_input[:rope_tokens].unsqueeze(1)
-        _print_partial_rope_shape(f"{layer_name}:o_proj", x_rope, cos, -sin,
-                                  partial_slice)
+        cos = cos[:rope_tokens]
+        sin = sin[:rope_tokens]
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             x_rope, cos, -sin,
@@ -1521,12 +1520,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 f"DSA o_proj output tokens exceed computed tokens: "
                 f"layer={layer_name}, output={tuple(output.shape)}, "
                 f"computed={tuple(o.shape)}")
-        if output_tokens != num_tokens:
-            print(
-                "DSV4_ROPE_DEBUG o_proj_output_prefix "
-                f"tag={layer_name}:o_proj "
-                f"computed_tokens={num_tokens} output_tokens={output_tokens}",
-                flush=True)
         output[...] = self.wo_b(o[:output_tokens])
 
         return output_padded
@@ -1569,8 +1562,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         # q = triton_q_rms(q, self.eps)
         partial_slice = [self.nope_head_dim, self.head_dim]
         x_rope = q.unsqueeze(1)
-        _print_partial_rope_shape(f"{layer_name}:prefill_q", x_rope, cos,
-                                  sin, partial_slice)
+        cos, sin = _align_rope_to_x(f"{layer_name}:prefill_q", x_rope, cos,
+                                    sin)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             x_rope,
@@ -1585,8 +1578,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         assert self.rope_head_dim is not None
         kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
         x_rope = kv.unsqueeze(1)
-        _print_partial_rope_shape(f"{layer_name}:prefill_kv", x_rope, cos,
-                                  sin, partial_slice)
+        cos, sin = _align_rope_to_x(f"{layer_name}:prefill_kv", x_rope, cos,
+                                    sin)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             x_rope,
@@ -1862,8 +1855,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         q = self.q_norm_without_weight(q)
         partial_slice = [self.nope_head_dim, self.head_dim]
         x_rope = q.unsqueeze(1)
-        _print_partial_rope_shape(f"{layer_name}:decode_q", x_rope, cos, sin,
-                                  partial_slice)
+        cos, sin = _align_rope_to_x(f"{layer_name}:decode_q", x_rope, cos,
+                                    sin)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             x_rope,
@@ -1885,8 +1878,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
             x_rope = kv.unsqueeze(1)
-            _print_partial_rope_shape(f"{layer_name}:decode_kv", x_rope, cos,
-                                      sin, partial_slice)
+            cos, sin = _align_rope_to_x(f"{layer_name}:decode_kv", x_rope,
+                                        cos, sin)
 
             torch.ops._C_ascend.inplace_partial_rotary_mul(
                 x_rope,
@@ -2142,8 +2135,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             self.indexcom_head_dim
         ]
         x_rope = q.unsqueeze(1)
-        _print_partial_rope_shape("indexer_select_qli:q", x_rope, cos, sin,
-                                  partial_slice)
+        cos, sin = _align_rope_to_x("indexer_select_qli:q", x_rope, cos, sin)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             x_rope,

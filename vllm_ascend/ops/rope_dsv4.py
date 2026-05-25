@@ -97,11 +97,6 @@ def get_cos_and_sin_dsa(positions: Union[torch.Tensor, Dict[str,
 
                 buf_cos, buf_sin = group_buffers
                 num_tokens = pos_tensor.size(0)
-                print(
-                    f"DSV4_ROPE_DEBUG rope_buffer={buf_cos.size(0)} "
-                    f"input_tokens={num_tokens}",
-                    flush=True,
-                )
 
                 buf_cos[:num_tokens].copy_(curr_cos)
                 buf_sin[:num_tokens].copy_(curr_sin)
