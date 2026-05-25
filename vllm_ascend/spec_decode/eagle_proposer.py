@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import builtins
 import copy
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -71,6 +72,15 @@ def _debug_layer_shape(x, layer_name):
         return _debug_shape(x[layer_name])
     except Exception as e:
         return f"{type(x).__name__}[{type(e).__name__}]"
+
+
+def _dsv4_meta_debug_print(*args, **kwargs):
+    if args and isinstance(args[0], str) and args[0].startswith("DSV4_META_DEBUG"):
+        return
+    return builtins.print(*args, **kwargs)
+
+
+print = _dsv4_meta_debug_print
 
 
 # TODO: Remove it when the bug of fx-graph is solved

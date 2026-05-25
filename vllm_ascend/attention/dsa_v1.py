@@ -1,3 +1,4 @@
+import builtins
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Optional, Tuple, Type, TypeVar
@@ -70,6 +71,15 @@ def _debug_rope_call(tag: str, x: torch.Tensor, cos: torch.Tensor,
         f"tag={tag} x={_debug_shape(x)} cos={_debug_shape(cos)} "
         f"sin={_debug_shape(sin)} partial_slice={partial_slice}",
         flush=True)
+
+
+def _dsv4_meta_debug_print(*args, **kwargs):
+    if args and isinstance(args[0], str) and args[0].startswith("DSV4_META_DEBUG"):
+        return
+    return builtins.print(*args, **kwargs)
+
+
+print = _dsv4_meta_debug_print
 
 
 def hadamard_transform_ref(x: torch.Tensor, hadamard: torch.Tensor, scale: int = 1.0, ):
