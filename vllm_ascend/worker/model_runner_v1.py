@@ -535,10 +535,23 @@ class NPUModelRunner(GPUModelRunner):
         # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
         # immediately once the other two flags are no longer needed.
         if self.dp_size == 1:
+            print(
+                "DSV4_META_DEBUG dp_sync_single "
+                f"dp_rank={self.dp_rank} dp_size={self.dp_size} "
+                f"is_draft_model={is_draft_model} num_tokens={num_tokens} "
+                f"with_prefill={with_prefill}",
+                flush=True)
             return num_tokens, None, with_prefill
 
         if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
+            print(
+                "DSV4_META_DEBUG dp_sync_skip "
+                f"dp_rank={self.dp_rank} dp_size={self.dp_size} "
+                f"is_draft_model={is_draft_model} num_tokens={num_tokens} "
+                f"with_prefill={with_prefill} "
+                f"num_tokens_after_padding={num_tokens_after_padding.tolist()}",
+                flush=True)
             return num_tokens, num_tokens_after_padding, with_prefill
 
         # Sync num_tokens, with_prefill across dp ranks.
@@ -553,6 +566,14 @@ class NPUModelRunner(GPUModelRunner):
         flags_tensor = torch.tensor([int(with_prefill)], dtype=torch.int32, device=self.device)
 
         packed_tensor = torch.cat([num_tokens_tensor, flags_tensor])
+        print(
+            "DSV4_META_DEBUG dp_sync_before_allreduce "
+            f"dp_rank={self.dp_rank} dp_size={self.dp_size} "
+            f"is_draft_model={is_draft_model} num_tokens={num_tokens} "
+            f"with_prefill={with_prefill} "
+            f"num_tokens_tensor={num_tokens_tensor.detach().cpu().tolist()} "
+            f"flags_tensor={flags_tensor.detach().cpu().tolist()}",
+            flush=True)
         dist.all_reduce(packed_tensor, group=get_dp_group().device_group)
         packed_tensor = packed_tensor.cpu()
 
@@ -564,6 +585,17 @@ class NPUModelRunner(GPUModelRunner):
 
         # Create a tensor for num_tokens_after_padding
         num_tokens_after_padding = torch.tensor([max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32)
+        print(
+            "DSV4_META_DEBUG dp_sync_after_allreduce "
+            f"dp_rank={self.dp_rank} dp_size={self.dp_size} "
+            f"is_draft_model={is_draft_model} input_num_tokens={num_tokens} "
+            f"packed_tensor={packed_tensor.tolist()} "
+            f"num_tokens_across_dp={num_tokens_across_dp.tolist()} "
+            f"synced_flags={synced_flags.tolist()} "
+            f"max_tokens_across_dp={max_tokens_across_dp} "
+            f"num_tokens_after_padding={num_tokens_after_padding.tolist()} "
+            f"global_with_prefill={global_with_prefill}",
+            flush=True)
 
         return max_tokens_across_dp, num_tokens_after_padding, global_with_prefill
 

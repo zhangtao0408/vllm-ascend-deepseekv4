@@ -924,6 +924,20 @@ class SpecDecodeBaseProposer(EagleProposer):
         # `model_hidden_states` represent the speculative model inputs.
         model_input_ids = self.input_ids[:num_input_tokens]
         model_positions = self._get_positions(num_input_tokens)
+        print(
+            "DSV4_META_DEBUG run_merged_draft_enter "
+            f"method={self.method} use_cuda_graph={self.use_cuda_graph} "
+            f"pass_hidden_states_to_model={self.pass_hidden_states_to_model} "
+            f"num_tokens={num_tokens} num_input_tokens={num_input_tokens} "
+            f"batch_size={batch_size} is_prefill={is_prefill} "
+            f"token_indices_to_sample={_debug_shape(token_indices_to_sample)} "
+            f"target_positions={_debug_shape(target_positions)} "
+            f"inputs_embeds={_debug_shape(inputs_embeds)} "
+            f"model_input_ids={_debug_shape(model_input_ids)} "
+            f"model_positions={_debug_shape(model_positions)} "
+            f"hidden_states_buffer={_debug_shape(self.hidden_states)} "
+            f"hidden_states_slice={_debug_shape(self.hidden_states[:num_input_tokens])}",
+            flush=True)
 
         model_kwargs = {
             "input_ids": model_input_ids,
@@ -933,21 +947,50 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         if self.pass_hidden_states_to_model:
             model_hidden_states = self.hidden_states[:num_input_tokens]
+            print(
+                "DSV4_META_DEBUG run_merged_draft_before_pad_reduce "
+                f"model_hidden_states={_debug_shape(model_hidden_states)} "
+                f"model_positions={_debug_shape(model_positions)}",
+                flush=True)
             model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
             model_kwargs["hidden_states"] = model_hidden_states
             if self.method == "mtp":
                 model_kwargs["positions"] = model_positions
+            print(
+                "DSV4_META_DEBUG run_merged_draft_after_pad_reduce "
+                f"model_hidden_states={_debug_shape(model_hidden_states)} "
+                f"model_positions={_debug_shape(model_positions)}",
+                flush=True)
 
+        print(
+            "DSV4_META_DEBUG run_merged_draft_model_call "
+            f"input_ids={_debug_shape(model_kwargs.get('input_ids'))} "
+            f"positions={_debug_shape(model_kwargs.get('positions'))} "
+            f"inputs_embeds={_debug_shape(model_kwargs.get('inputs_embeds'))} "
+            f"hidden_states={_debug_shape(model_kwargs.get('hidden_states'))}",
+            flush=True)
         ret_hidden_states = self.model(**model_kwargs)
         if not self.model_returns_tuple():
             last_hidden_states = ret_hidden_states
             hidden_states = last_hidden_states
         else:
             last_hidden_states, hidden_states = ret_hidden_states
+        print(
+            "DSV4_META_DEBUG run_merged_draft_model_return "
+            f"last_hidden_states={_debug_shape(last_hidden_states)} "
+            f"hidden_states={_debug_shape(hidden_states)} "
+            f"model_positions={_debug_shape(model_positions)}",
+            flush=True)
 
         last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
             last_hidden_states, model_positions, hidden_states
         )
+        print(
+            "DSV4_META_DEBUG run_merged_draft_after_all_gather "
+            f"last_hidden_states={_debug_shape(last_hidden_states)} "
+            f"hidden_states={_debug_shape(hidden_states)} "
+            f"model_positions={_debug_shape(model_positions)}",
+            flush=True)
 
         num_indices = token_indices_to_sample.shape[0]
         if self.pcp_size > 1:
