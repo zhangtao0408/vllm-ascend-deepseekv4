@@ -455,10 +455,33 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.block_size = kwargs.get("block_size", 128)
 
         self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata", None)
+        cached_num_actual_tokens = self.common_ratio_to_sas_metadata.get(
+            "num_actual_tokens")
+        cached_num_input_tokens = self.common_ratio_to_sas_metadata.get(
+            "num_input_tokens")
+        if (cached_num_actual_tokens is not None
+                and (cached_num_actual_tokens
+                     != common_attn_metadata.num_actual_tokens
+                     or cached_num_input_tokens
+                     != common_attn_metadata.num_input_tokens)):
+            print(
+                "DSV4_ROPE_DEBUG rebuild_stale_dsa_metadata "
+                f"cached_actual={cached_num_actual_tokens} "
+                f"current_actual={common_attn_metadata.num_actual_tokens} "
+                f"cached_input={cached_num_input_tokens} "
+                f"current_input={common_attn_metadata.num_input_tokens}",
+                flush=True)
+            self.common_ratio_to_sas_metadata.clear()
+            self.prefill_ratio_to_sas_metadata.clear()
+            self.decode_ratio_to_sas_metadata.clear()
 
         if self.common_ratio_to_sas_metadata.get("num_decodes", None) is None:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = \
                 split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
+            self.common_ratio_to_sas_metadata[
+                "num_actual_tokens"] = common_attn_metadata.num_actual_tokens
+            self.common_ratio_to_sas_metadata[
+                "num_input_tokens"] = common_attn_metadata.num_input_tokens
             self.common_ratio_to_sas_metadata["num_decodes"] = self.num_decodes
             self.common_ratio_to_sas_metadata["num_prefills"] = self.num_prefills
             self.common_ratio_to_sas_metadata["num_decode_tokens"] = self.num_decode_tokens
