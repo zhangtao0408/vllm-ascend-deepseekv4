@@ -547,7 +547,7 @@ class NPUModelRunner(GPUModelRunner):
         # immediately once the other two flags are no longer needed.
         if self.dp_size == 1:
             print(
-                "DSV4_META_DEBUG dp_sync_single "
+                "DSV4_META_DEBUG dp_sync_draft_single "
                 f"dp_rank={self.dp_rank} dp_size={self.dp_size} "
                 f"is_draft_model={is_draft_model} num_tokens={num_tokens} "
                 f"with_prefill={with_prefill}",
@@ -557,7 +557,7 @@ class NPUModelRunner(GPUModelRunner):
         if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             print(
-                "DSV4_META_DEBUG dp_sync_skip "
+                "DSV4_META_DEBUG dp_sync_draft_skip "
                 f"dp_rank={self.dp_rank} dp_size={self.dp_size} "
                 f"is_draft_model={is_draft_model} num_tokens={num_tokens} "
                 f"with_prefill={with_prefill} "
@@ -580,7 +580,7 @@ class NPUModelRunner(GPUModelRunner):
         packed_tensor = torch.cat([num_tokens_tensor, flags_tensor])
         packed_before = packed_tensor.detach().cpu().tolist()
         print(
-            "DSV4_META_DEBUG dp_sync_before_allreduce "
+            "DSV4_META_DEBUG dp_sync_draft_before_allreduce "
             f"dp_rank={self.dp_rank} dp_size={self.dp_size} "
             f"is_draft_model={is_draft_model} num_tokens={num_tokens} "
             f"with_prefill={with_prefill} "
@@ -594,15 +594,19 @@ class NPUModelRunner(GPUModelRunner):
         synced_flags = packed_tensor[-1:]
         max_tokens_across_dp = torch.max(num_tokens_across_dp).item()
         global_with_prefill = bool(synced_flags[0])
+        own_tokens_after = int(num_tokens_across_dp[self.dp_rank].item())
+        own_slot_lt_local = own_tokens_after < num_tokens
         max_lt_local = max_tokens_across_dp < num_tokens
 
         # Create a tensor for num_tokens_after_padding
         num_tokens_after_padding = torch.tensor([max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32)
         print(
-            "DSV4_META_DEBUG dp_sync_after_allreduce "
+            "DSV4_META_DEBUG dp_sync_draft_after_allreduce "
             f"dp_rank={self.dp_rank} dp_size={self.dp_size} "
             f"is_draft_model={is_draft_model} input_num_tokens={num_tokens} "
             f"packed_after={packed_tensor.tolist()} "
+            f"own_tokens_after={own_tokens_after} "
+            f"own_slot_lt_local={own_slot_lt_local} "
             f"max_tokens_across_dp={max_tokens_across_dp} "
             f"max_lt_local={max_lt_local} "
             f"global_with_prefill={global_with_prefill}",
@@ -1979,11 +1983,23 @@ class NPUModelRunner(GPUModelRunner):
         tensor = torch.zeros(2, self.dp_size, device=self.device, dtype=torch.int32)
         tensor[0][self.dp_rank] = num_tokens_padded
         tensor[1][self.dp_rank] = cudagraph_mode
+        tensor_before = tensor.detach().cpu().tolist()
+        print(
+            "DSV4_META_DEBUG dp_sync_main_before_allreduce "
+            f"dp_rank={self.dp_rank} dp_size={self.dp_size} "
+            f"num_tokens_padded={num_tokens_padded} "
+            f"cudagraph_mode={cudagraph_mode} "
+            f"allow_dp_padding={allow_dp_padding} "
+            f"packed_before={tensor_before}",
+            flush=True)
         dist.all_reduce(tensor, group=get_dp_group().device_group)
         tensor = tensor.cpu()
 
         num_tokens_across_dp = tensor[0, :]
         max_num_tokens = int(num_tokens_across_dp.max().item())
+        own_tokens_after = int(num_tokens_across_dp[self.dp_rank].item())
+        own_slot_lt_local = own_tokens_after < num_tokens_padded
+        max_lt_local = max_num_tokens < num_tokens_padded
 
         if allow_dp_padding:
             num_tokens_after_padding = torch.tensor(
@@ -1996,6 +2012,19 @@ class NPUModelRunner(GPUModelRunner):
 
         # Synchronize cudagraph_mode across ranks (take min)
         synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
+        print(
+            "DSV4_META_DEBUG dp_sync_main_after_allreduce "
+            f"dp_rank={self.dp_rank} dp_size={self.dp_size} "
+            f"input_num_tokens_padded={num_tokens_padded} "
+            f"packed_after={tensor.tolist()} "
+            f"own_tokens_after={own_tokens_after} "
+            f"own_slot_lt_local={own_slot_lt_local} "
+            f"max_num_tokens={max_num_tokens} "
+            f"max_lt_local={max_lt_local} "
+            f"allow_dp_padding={allow_dp_padding} "
+            f"num_tokens_after_padding={num_tokens_after_padding.tolist()} "
+            f"synced_cudagraph_mode={synced_cudagraph_mode}",
+            flush=True)
         return False, num_tokens_after_padding, synced_cudagraph_mode
 
     def _determine_batch_execution_and_padding(
