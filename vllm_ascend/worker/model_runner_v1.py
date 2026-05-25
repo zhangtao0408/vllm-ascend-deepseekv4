@@ -18,7 +18,6 @@
 #
 
 import math
-import os
 import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -2014,15 +2013,6 @@ class NPUModelRunner(GPUModelRunner):
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
-
-        if os.getenv("DSV4_ROPE_DEBUG", "0").lower() in ("1", "true", "yes", "on"):
-            logger.warning(
-                "DSV4_ROPE_DEBUG batch padding: num_tokens=%s "
-                "num_tokens_padded=%s batch_descriptor=%s cudagraph_mode=%s "
-                "num_tokens_across_dp=%s spec_method=%s",
-                num_tokens, num_tokens_padded, batch_descriptor,
-                cudagraph_mode, num_tokens_across_dp,
-                getattr(self.speculative_config, "method", None))
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
             cudagraph_stats = CUDAGraphStat(

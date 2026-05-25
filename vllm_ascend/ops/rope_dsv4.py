@@ -1,12 +1,10 @@
 import math
-import os
 from typing import Any, Dict, List, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch_npu
 from vllm.config import VllmConfig
-from vllm.logger import logger
 from vllm.platforms import current_platform
 
 
@@ -21,37 +19,6 @@ class RopeGlobalState:
 
 
 _ROPE_STATE = RopeGlobalState()
-
-
-def _rope_debug_enabled() -> bool:
-    return os.getenv("DSV4_ROPE_DEBUG", "0").lower() in ("1", "true", "yes", "on")
-
-
-def _ensure_runtime_buffer_capacity(config_key: str, group_name: str,
-                                    num_tokens: int) -> Tuple[torch.Tensor,
-                                                              torch.Tensor]:
-    buf_cos, buf_sin = _ROPE_STATE.runtime_buffer[config_key][group_name]
-    if num_tokens <= buf_cos.size(0):
-        return buf_cos, buf_sin
-
-    new_size = max(num_tokens, buf_cos.size(0) * 2)
-    if _rope_debug_enabled():
-        logger.warning(
-            "DSV4_ROPE_DEBUG expanding runtime rope buffer: config_key=%s "
-            "group=%s old_size=%s new_size=%s requested_tokens=%s",
-            config_key, group_name, buf_cos.size(0), new_size, num_tokens)
-    new_cos = torch.ones(new_size,
-                         *buf_cos.shape[1:],
-                         dtype=buf_cos.dtype,
-                         device=buf_cos.device)
-    new_sin = torch.zeros(new_size,
-                          *buf_sin.shape[1:],
-                          dtype=buf_sin.dtype,
-                          device=buf_sin.device)
-    new_cos[:buf_cos.size(0)].copy_(buf_cos)
-    new_sin[:buf_sin.size(0)].copy_(buf_sin)
-    _ROPE_STATE.runtime_buffer[config_key][group_name] = (new_cos, new_sin)
-    return new_cos, new_sin
 
 
 class RopeDataProxy:
@@ -128,16 +95,13 @@ def get_cos_and_sin_dsa(positions: Union[torch.Tensor, Dict[str,
                 if group_buffers is None:
                     continue
 
+                buf_cos, buf_sin = group_buffers
                 num_tokens = pos_tensor.size(0)
-                buf_cos, buf_sin = _ensure_runtime_buffer_capacity(
-                    config_key, group_name, num_tokens)
-                if _rope_debug_enabled():
-                    logger.warning(
-                        "DSV4_ROPE_DEBUG get_cos_and_sin_dsa cache: "
-                        "config_key=%s group=%s positions=%s curr_cos=%s "
-                        "buf_cos=%s",
-                        config_key, group_name, tuple(pos_tensor.shape),
-                        tuple(curr_cos.shape), tuple(buf_cos.shape))
+                print(
+                    f"DSV4_ROPE_DEBUG rope_buffer={buf_cos.size(0)} "
+                    f"input_tokens={num_tokens}",
+                    flush=True,
+                )
 
                 buf_cos[:num_tokens].copy_(curr_cos)
                 buf_sin[:num_tokens].copy_(curr_sin)
@@ -202,7 +166,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
             _ROPE_STATE.runtime_buffer[config_key] = {}
 
         target_device = current_platform.device_type
-        max_batch_size = vllm_config.scheduler_config.max_num_batched_tokens
+        max_batch_size = vllm_config.scheduler_config.max_num_batched_tokens + 128
         for grp in rope_groups:
             if grp not in _ROPE_STATE.runtime_buffer[config_key]:
                 buf_cos = torch.ones(max_batch_size,

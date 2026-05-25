@@ -1,5 +1,4 @@
 import math
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Optional, Tuple, Type, TypeVar
 
@@ -1434,15 +1433,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         cos = attn_metadata[0].cos[layer_name]
         sin = attn_metadata[0].sin[layer_name]
         num_tokens = o_proj_input.shape[0]
-        if os.getenv("DSV4_ROPE_DEBUG", "0").lower() in ("1", "true", "yes", "on"):
-            logger.warning(
-                "DSV4_ROPE_DEBUG DSA rope call: layer=%s x=%s cos=%s "
-                "sin=%s forward_tokens=%s actual_tokens=%s "
-                "decode_tokens=%s prefill_tokens=%s",
-                layer_name, tuple(o_proj_input.unsqueeze(1).shape),
-                tuple(cos.shape), tuple(sin.shape),
-                forward_context.num_tokens, attn_metadata[0].num_actual_tokens,
-                decode_tokens, attn_metadata[0].num_prefill_tokens)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input.unsqueeze(1), cos, -sin,
