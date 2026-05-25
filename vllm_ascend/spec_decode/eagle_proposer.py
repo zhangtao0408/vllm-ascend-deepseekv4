@@ -642,6 +642,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         self.slot_mapping_group[0][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping[:slot_mapping_lens])
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
+        common_attn_metadata.num_actual_tokens = num_tokens
         common_attn_metadata.num_input_tokens = num_input_tokens
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
