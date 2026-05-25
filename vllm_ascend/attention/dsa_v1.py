@@ -1440,6 +1440,9 @@ class AscendDSAImpl(DSAAttentionImpl):
             cos = attn_metadata[0].decode.cos[layer_name]
             sin = attn_metadata[0].decode.sin[layer_name]
 
+        if actual_tokens < o_proj_input.shape[0]:
+            o_proj_input[actual_tokens:].zero_()
+
         cos = attn_metadata[0].cos[layer_name]
         sin = attn_metadata[0].sin[layer_name]
         num_tokens = o_proj_input.shape[0]
@@ -1489,7 +1492,19 @@ class AscendDSAImpl(DSAAttentionImpl):
                                                       perm_x1=(1,0,2), perm_x2=(0,1,2), perm_y=(1,0,2))
 
         o = o.reshape(num_tokens, -1)
-        output[...] = self.wo_b(o)
+        output_tokens = output.shape[0]
+        if output_tokens > num_tokens:
+            raise RuntimeError(
+                f"DSA o_proj output tokens exceed computed tokens: "
+                f"layer={layer_name}, output={tuple(output.shape)}, "
+                f"computed={tuple(o.shape)}")
+        if output_tokens != num_tokens:
+            print(
+                "DSV4_ROPE_DEBUG o_proj_output_prefix "
+                f"tag={layer_name}:o_proj "
+                f"computed_tokens={num_tokens} output_tokens={output_tokens}",
+                flush=True)
+        output[...] = self.wo_b(o[:output_tokens])
 
         return output_padded
 
