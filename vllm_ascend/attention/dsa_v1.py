@@ -48,6 +48,16 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 
+def _print_partial_rope_shape(tag: str, x: torch.Tensor, cos: torch.Tensor,
+                              sin: torch.Tensor, partial_slice: list[int]):
+    print(
+        f"DSV4_ROPE_DEBUG partial_rope tag={tag} "
+        f"x={tuple(x.shape)} cos={tuple(cos.shape)} "
+        f"sin={tuple(sin.shape)} partial_slice={partial_slice}",
+        flush=True,
+    )
+
+
 def hadamard_transform_ref(x: torch.Tensor, hadamard: torch.Tensor, scale: int = 1.0, ):
     x_shape = x.shape
     dim = x.shape[-1]
@@ -1433,11 +1443,15 @@ class AscendDSAImpl(DSAAttentionImpl):
         cos = attn_metadata[0].cos[layer_name]
         sin = attn_metadata[0].sin[layer_name]
         num_tokens = o_proj_input.shape[0]
+        partial_slice = [self.nope_head_dim, self.head_dim]
+        x_rope = o_proj_input.unsqueeze(1)
+        _print_partial_rope_shape(f"{layer_name}:o_proj", x_rope, cos, -sin,
+                                  partial_slice)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
-            o_proj_input.unsqueeze(1), cos, -sin,
+            x_rope, cos, -sin,
             rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
+            partial_slice=partial_slice,
         )
 
         # o
@@ -1497,26 +1511,33 @@ class AscendDSAImpl(DSAAttentionImpl):
         q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
         q = self.q_norm_without_weight(q)
         # q = triton_q_rms(q, self.eps)
+        partial_slice = [self.nope_head_dim, self.head_dim]
+        x_rope = q.unsqueeze(1)
+        _print_partial_rope_shape(f"{layer_name}:prefill_q", x_rope, cos,
+                                  sin, partial_slice)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
-            q.unsqueeze(1),
+            x_rope,
             cos,
             sin,
             rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
+            partial_slice=partial_slice,
         )
         # win kv & tok_dis
         kv = self.wkv(hidden_states)
         kv = self.kv_norm(kv)
         assert self.rope_head_dim is not None
         kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+        x_rope = kv.unsqueeze(1)
+        _print_partial_rope_shape(f"{layer_name}:prefill_kv", x_rope, cos,
+                                  sin, partial_slice)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
-            kv.unsqueeze(1),
+            x_rope,
             cos,
             sin,
             rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
+            partial_slice=partial_slice,
         )
 
         # swa exec kv
@@ -1783,13 +1804,17 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         # q = triton_q_rms(q, self.eps)
         q = self.q_norm_without_weight(q)
+        partial_slice = [self.nope_head_dim, self.head_dim]
+        x_rope = q.unsqueeze(1)
+        _print_partial_rope_shape(f"{layer_name}:decode_q", x_rope, cos, sin,
+                                  partial_slice)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
-            q.unsqueeze(1),
+            x_rope,
             cos,
             sin,
             rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
+            partial_slice=partial_slice,
         )
 
         with npu_stream_switch(attention_calculation_stream(),
@@ -1803,13 +1828,16 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+            x_rope = kv.unsqueeze(1)
+            _print_partial_rope_shape(f"{layer_name}:decode_kv", x_rope, cos,
+                                      sin, partial_slice)
 
             torch.ops._C_ascend.inplace_partial_rotary_mul(
-                kv.unsqueeze(1),
+                x_rope,
                 cos,
                 sin,
                 rotary_mode="interleave",
-                partial_slice=[self.nope_head_dim, self.head_dim],
+                partial_slice=partial_slice,
             )
 
             # swa exec kv
@@ -2053,16 +2081,20 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             q = self.inderxer_wq_b(qr)
         q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)  # [T, N, D]
+        partial_slice = [
+            self.indexcom_head_dim - self.rope_head_dim,
+            self.indexcom_head_dim
+        ]
+        x_rope = q.unsqueeze(1)
+        _print_partial_rope_shape("indexer_select_qli:q", x_rope, cos, sin,
+                                  partial_slice)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
-            q.unsqueeze(1),
+            x_rope,
             cos,
             sin,
             rotary_mode="interleave",
-            partial_slice=[
-                self.indexcom_head_dim - self.rope_head_dim,
-                self.indexcom_head_dim
-            ],
+            partial_slice=partial_slice,
         )
 
         q = rotate_activation(q, indexer_kv_scale_metadata.hadamard)
